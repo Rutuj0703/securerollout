@@ -4,6 +4,10 @@ metadata:
   name: mock-security-check
   namespace: demo
 spec:
+  args:
+    - name: image-digest
+    - name: namespace
+    - name: pod-hash
   metrics:
     - name: security-check
       interval: 10s
@@ -13,4 +17,6 @@ spec:
       provider:
         web:
           url: "http://mock-check.demo.svc.cluster.local:8080"
+          method: POST
+          body: '{"image_digest": "{{args.image-digest}}", "namespace": "{{args.namespace}}", "pod_template_hash": "{{args.pod-hash}}"}'
           jsonPath: "{$.status}"

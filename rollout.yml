@@ -9,7 +9,19 @@ spec:
     canary:
       steps:
         - setWeight: 20
-        - pause: {duration: 30s}
+        - analysis:
+            templates:
+              - templateName: mock-security-check
+            args:
+              - name: image-digest
+                value: "sha256:placeholder1234567890abcdef"
+              - name: namespace
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.namespace
+              - name: pod-hash
+                valueFrom:
+                  podTemplateHashValue: Latest
         - setWeight: 50
         - pause: {duration: 30s}
         - setWeight: 100

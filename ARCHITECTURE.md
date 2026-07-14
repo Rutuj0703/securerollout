@@ -49,3 +49,27 @@ Argo Rollouts treats metric results as **three** states: `Successful`, `Failed`,
 ## Open questions / things to revisit
 - [ ] Validate `interval`/`consecutiveErrorLimit`/`count` against actual Trivy/Kyverno/Rekor response times once analysis-runner exists
 - [ ] Design analysis-runner's `/check` API contract (request/response schema)
+
+## Session 2 — Analysis-runner request/response schema design, AnalysisTemplate args wiring
+
+### Request schema (reasoned from first principles)
+- `image_digest` — not tag. Tags are mutable pointers; a registry can silently swap what a tag points to (STRIDE tampering risk already identified). Digest is a cryptographic hash of exact content — pins to what CI actually scanned/signed. Used by both Trivy (scan target) and cosign/Rekor (verify target) — no redundant fields needed.
+- `namespace` + `pod_template_hash` — NOT individual pod name (pods are ephemeral, get recreated with new names even within one revision). `rollouts-pod-template-hash` label is what Kubernetes/Argo Rollouts itself generates per-revision, stable across pod restarts within that revision. Checking one representative pod per revision is sufficient — pod specs within a revision are identical by construction (same template), so checking all 5 replicas would be redundant.
+
+### Response schema (reasoned from first principles)
+- `overall_status`: "pass"/"fail" — the ONLY field Argo Rollouts' Web provider reads via jsonPath
+- `checked_digest` — echo back what was actually checked, guards against request/response mismatch bugs
+- `checks: { trivy, kyverno, cosign }` — each always present (pass or fail, not just on failure — passing evidence matters too, e.g. for the "killer demo clip" and for audit trails), each with `status` + `reason` (not just pass/fail — a bare boolean gives zero triage starting point for on-call at 2am; different failing checks need completely different response playbooks)
+
+### Argo Rollouts args-passing mechanism (learned hands-on)
+- AnalysisTemplate must explicitly declare every arg it expects under `spec.args` — referencing `{{args.x}}` in metrics config without declaring `x` in `spec.args` fails with "failed to resolve {{args.x}}". This was the actual root cause of an hour+ debugging session — don't skip this declaration.
+- Rollout supplies actual values when referencing the template, via three mechanisms:
+  - `value: "..."` — static value (used for image-digest; real value would come from CI/GitOps pipeline writing it in the same commit as the image field, since digest isn't otherwise inferable from a running cluster object)
+  - `valueFrom.fieldRef.fieldPath: metadata.namespace` — reads a field off the Rollout object itself
+  - `valueFrom.podTemplateHashValue: Latest` (or `Stable`) — built-in convenience, resolves to the actual rollouts-pod-template-hash of the new (or old) ReplicaSet, no manual lookup needed
+
+### Debugging notes (real bugs hit, worth remembering)
+1. YAML key typo: `template:` vs `templates:` (plural) under an inline analysis step — caught by Kubernetes' strict decoding, failed loudly rather than silently misbehaving.
+2. Argo Rollouts only runs canary steps (including inline analysis) when a genuine Stable-vs-Latest ReplicaSet distinction exists — the very first deploy to a Rollout skips steps entirely since there's nothing to canary against. `podTemplateHashValue: Latest` can't resolve without this distinction existing.
+3. A rollout stuck in `Degraded`/aborted state needs an explicit `kubectl argo rollouts retry` before it'll accept further updates — a plain spec change isn't enough to unstick it.
+4. Root cause of the persistent "failed to resolve {{args.pod-hash}}" error across multiple restructuring attempts: the AnalysisTemplate was missing its `spec.args` declaration block entirely (dropped during earlier live `kubectl edit` sessions). Lesson: prefer editing the source YAML file and re-applying over repeated `kubectl edit` on live objects — live edits don't automatically sync back to the file, so the file and cluster state can silently diverge.
