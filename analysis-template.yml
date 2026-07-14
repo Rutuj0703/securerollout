@@ -1,0 +1,16 @@
+kind: AnalysisTemplate
+apiVersion: argoproj.io/v1alpha1
+metadata:
+  name: mock-security-check
+  namespace: demo
+spec:
+  metrics:
+    - name: security-check
+      interval: 10s
+      count: 3
+      successCondition: "result == 'pass'"
+      failureCondition: "result == 'fail'"
+      provider:
+        web:
+          url: "http://mock-check.demo.svc.cluster.local:8080"
+          jsonPath: "{$.status}"
