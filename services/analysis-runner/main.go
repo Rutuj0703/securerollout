@@ -24,6 +24,7 @@ type CheckResponse struct {
 type ChecksBlock struct {
 	Trivy CheckResult `json:"trivy"`
 	Kyverno CheckResult `json:"kyverno"`
+	Cosign CheckResult `json:"cosign"`
 }
 
 type CheckResult struct {
@@ -194,6 +195,32 @@ func runKyvernoCheck(namespace string, podTemplateHash string) CheckResult {
 	}
 }
 
+// runCosignVerify shells out to cosign to verify a keyless signature
+// exists and is valid for the given image reference.
+func runCosignVerify(imageRef string) CheckResult {
+	cmd := exec.Command("cosign", "verify",
+		imageRef,
+		"--certificate-identity-regexp", ".*",
+		"--certificate-oidc-issuer-regexp", ".*")
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return CheckResult{
+			Status: "fail",
+			Reason: fmt.Sprintf("signature verification failed: %s", stderr.String()),
+		}
+	}
+
+	return CheckResult{
+		Status: "pass",
+		Reason: "signature verified against Rekor transparency log",
+	}
+}
+
 func checkHandler(w http.ResponseWriter, r *http.Request) {
 	var req CheckRequest
 	err := json.NewDecoder(r.Body).Decode(&req)
@@ -215,9 +242,10 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	kyvernoResult := runKyvernoCheck(req.Namespace, req.PodTemplateHash)
+	cosignResult := runCosignVerify(req.ImageDigest)
 
 	overallStatus := "pass"
-	if trivyResult.Status == "fail" || kyvernoResult.Status == "fail" {
+	if trivyResult.Status == "fail" || kyvernoResult.Status == "fail" || cosignResult.Status== "fail"  {
 		overallStatus = "fail"
 	}
 
@@ -227,6 +255,7 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 		Checks: ChecksBlock{
 			Trivy:   trivyResult,
 			Kyverno: kyvernoResult,
+			Cosign: cosignResult,
 		},
 	}
 

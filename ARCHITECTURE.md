@@ -100,7 +100,29 @@ Argo Rollouts treats metric results as **three** states: `Successful`, `Failed`,
 ### Open design question — error handling change
 Changed Trivy's hard-error path: instead of returning HTTP 500 immediately (which would abort the whole request and never report Kyverno's result), an internal tool failure now surfaces as an explicit `checks.trivy.status: "fail"` within a normal 200 response. Tradeoff: keeps full checks breakdown visible for debugging even when one sub-check errors, but means Argo Rollouts' `Error`/`consecutiveErrorLimit` mechanism now only triggers when analysis-runner itself is completely unreachable — an internal tool failure (Trivy crashes, Kyverno unreachable) surfaces as a clean "fail" rather than an "Error" state. Need to decide if this is actually the desired behavior, or if certain internal failures (e.g., Trivy DB completely corrupted vs. a single scan failing) should still propagate as a hard error.
 
+
+## Session 4 — cosign/Rekor integration; all three checks complete
+
+### cosign integration
+- Signed a real image (`securerollout-demo:blue`, pushed to own Docker Hub) using keyless (OIDC) signing — authenticated via browser, Sigstore issued short-lived cert, signature + Rekor transparency log entry created
+- cosign itself warned against signing by tag rather than digest — direct external validation of the project's own "digest, never tag" threat-model decision (STRIDE: tampering)
+- Verified both outcomes manually before coding: unsigned image (`argoproj/rollouts-demo:blue`) → clean `no signatures found` error, not a partial/warning state; signed image → full verification including Rekor transparency log check and cert chain validation
+- Simplest of the three checks to implement — cosign's own exit code (0/non-zero) directly indicates pass/fail, no need to parse structured output and threshold like Trivy's vulnerability counts
+
+### Note on public transparency log
+Keyless signing permanently records the signer's OIDC identity (incl. email) in Rekor's public, immutable log — acceptable/intentional here since this is a public portfolio project, but worth being deliberate about for any real signing identity used in production.
+
+### Milestone: all three checks (Trivy, Kyverno, cosign) working together
+First working end-to-end response combining all three, against real signed/unsigned/vulnerable images — confirms analysis-runner's core logic is complete. Verified mixed result: Trivy fail + Kyverno fail + cosign pass → overall_status correctly "fail".
+
+### Remaining before this is genuinely production-shaped
+- [ ] Containerize analysis-runner (Dockerfile) — must include trivy, cosign, kubectl binaries in the image alongside the Go binary, since all three are shelled out to
+- [ ] Real RBAC (ServiceAccount + Role) — currently running with full local kubectl access, not least-privilege
+- [ ] Wire the real AnalysisTemplate (mock-security-check) to point at analysis-runner's actual /check endpoint instead of the mock
+- [ ] Replace placeholder image-digest arg with real CI/GitOps-injected value
+- [ ] Decide/tune consecutiveErrorLimit etc. against real observed latency of a combined Trivy+Kyverno+cosign call (currently untested — likely several seconds combined, especially Trivy's DB-backed scan)
 ### Not yet done
-- [ ] cosign/Rekor verification (third check)
 - [ ] Containerize analysis-runner (Dockerfile), test running as an actual pod — note: no local Docker socket inside a typical pod, Trivy will need to reach the registry remotely, not rely on local docker/containerd sockets like it did on the Ubuntu host
 - [ ] Real RBAC scoping for analysis-runner's ServiceAccount (currently running locally with your own kubectl credentials — full access, not the least-privilege Role from the original architecture doc)
+
+
