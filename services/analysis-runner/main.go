@@ -23,6 +23,7 @@ type CheckResponse struct {
 
 type ChecksBlock struct {
 	Trivy CheckResult `json:"trivy"`
+	Kyverno CheckResult `json:"kyverno"`
 }
 
 type CheckResult struct {
@@ -46,6 +47,19 @@ type TrivyVulnerability struct {
 	Severity         string `json:"Severity"`
 	InstalledVersion string `json:"InstalledVersion"`
 	FixedVersion     string `json:"FixedVersion"`
+}
+
+// --- Structs matching Kyverno PolicyReport JSON output shape ---
+
+type PolicyReport struct {
+	Results []PolicyReportResult `json:"results"`
+}
+
+type PolicyReportResult struct {
+	Policy  string `json:"policy"`
+	Rule    string `json:"rule"`
+	Result  string `json:"result"`
+	Message string `json:"message"`
 }
 
 // runTrivyScan shells out to the real trivy binary and returns the parsed report.
@@ -97,6 +111,89 @@ func evaluateTrivyResult(report *TrivyReport) CheckResult {
 	}
 }
 
+// runKyvernoCheck finds the PolicyReport for a pod matching the given
+// namespace and pod-template-hash, and evaluates it for failures.
+func runKyvernoCheck(namespace string, podTemplateHash string) CheckResult {
+	// Find a pod matching this revision's label
+	cmd := exec.Command("kubectl", "get", "pods",
+		"-n", namespace,
+		"-l", "rollouts-pod-template-hash="+podTemplateHash,
+		"-o", "jsonpath={.items[0].metadata.name}")
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil || stdout.String() == "" {
+		return CheckResult{
+			Status: "fail",
+			Reason: fmt.Sprintf("could not find pod for revision: %v, stderr: %s", err, stderr.String()),
+		}
+	}
+	podName := stdout.String()
+
+	// Kyverno names PolicyReports after the resource they cover, but the
+	// simplest reliable lookup is by resource name via label/field selector.
+	// For now, fetch all PolicyReports in the namespace and find the one
+	// whose resource name matches our pod.
+	cmd2 := exec.Command("kubectl", "get", "policyreport",
+		"-n", namespace,
+		"-o", "json")
+
+	var stdout2, stderr2 bytes.Buffer
+	cmd2.Stdout = &stdout2
+	cmd2.Stderr = &stderr2
+
+	err = cmd2.Run()
+	if err != nil {
+		return CheckResult{
+			Status: "fail",
+			Reason: fmt.Sprintf("could not fetch policy reports: %v, stderr: %s", err, stderr2.String()),
+		}
+	}
+
+	var reportList struct {
+		Items []struct {
+			Metadata struct {
+				OwnerReferences []struct {
+					Kind string `json:"kind"`
+					Name string `json:"name"`
+				} `json:"ownerReferences"`
+			} `json:"metadata"`
+			Results []PolicyReportResult `json:"results"`
+		} `json:"items"`
+	}
+
+	err = json.Unmarshal(stdout2.Bytes(), &reportList)
+	if err != nil {
+		return CheckResult{
+			Status: "fail",
+			Reason: fmt.Sprintf("failed to parse policy reports: %v", err),
+		}
+	}
+
+	for _, item := range reportList.Items {
+		for _, owner := range item.Metadata.OwnerReferences {
+			if owner.Kind == "Pod" && owner.Name == podName {
+				for _, result := range item.Results {
+					if result.Result == "fail" {
+						return CheckResult{
+							Status: "fail",
+							Reason: result.Message,
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return CheckResult{
+		Status: "pass",
+		Reason: "no policy violations found",
+	}
+}
+
 func checkHandler(w http.ResponseWriter, r *http.Request) {
 	var req CheckRequest
 	err := json.NewDecoder(r.Body).Decode(&req)
@@ -109,21 +206,30 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 		req.ImageDigest, req.Namespace, req.PodTemplateHash)
 
 	report, err := runTrivyScan(req.ImageDigest)
+	var trivyResult CheckResult
 	if err != nil {
 		log.Printf("Trivy scan failed: %v", err)
-		http.Error(w, "trivy scan failed", http.StatusInternalServerError)
-		return
+		trivyResult = CheckResult{Status: "fail", Reason: fmt.Sprintf("trivy check errored: %v", err)}
+	} else {
+		trivyResult = evaluateTrivyResult(report)
 	}
 
-	trivyResult := evaluateTrivyResult(report)
+	kyvernoResult := runKyvernoCheck(req.Namespace, req.PodTemplateHash)
+
+	overallStatus := "pass"
+	if trivyResult.Status == "fail" || kyvernoResult.Status == "fail" {
+		overallStatus = "fail"
+	}
 
 	response := CheckResponse{
-		OverallStatus: trivyResult.Status,
+		OverallStatus: overallStatus,
 		CheckedDigest: req.ImageDigest,
 		Checks: ChecksBlock{
-			Trivy: trivyResult,
+			Trivy:   trivyResult,
+			Kyverno: kyvernoResult,
 		},
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }

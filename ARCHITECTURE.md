@@ -73,3 +73,34 @@ Argo Rollouts treats metric results as **three** states: `Successful`, `Failed`,
 2. Argo Rollouts only runs canary steps (including inline analysis) when a genuine Stable-vs-Latest ReplicaSet distinction exists — the very first deploy to a Rollout skips steps entirely since there's nothing to canary against. `podTemplateHashValue: Latest` can't resolve without this distinction existing.
 3. A rollout stuck in `Degraded`/aborted state needs an explicit `kubectl argo rollouts retry` before it'll accept further updates — a plain spec change isn't enough to unstick it.
 4. Root cause of the persistent "failed to resolve {{args.pod-hash}}" error across multiple restructuring attempts: the AnalysisTemplate was missing its `spec.args` declaration block entirely (dropped during earlier live `kubectl edit` sessions). Lesson: prefer editing the source YAML file and re-applying over repeated `kubectl edit` on live objects — live edits don't automatically sync back to the file, so the file and cluster state can silently diverge.
+
+## Session 3 — analysis-runner: Trivy + Kyverno integration (Go)
+
+### Go fundamentals learned hands-on
+- `package main` / `func main()`, Go modules (`go mod init`)
+- Structs + JSON struct tags for typed request/response handling
+- `os/exec` for shelling out to CLI tools (trivy, kubectl) — args passed as a slice, not a shell string, which avoids shell-injection risk since `image_digest` is externally supplied input
+- Explicit `err != nil` checking as Go's core idiom — a natural fit for fail-closed design, since every failure point must be explicitly handled, nothing propagates silently
+- `bytes.Buffer` + `cmd.Stdout`/`cmd.Stderr` to capture full command output including stderr (capturing only stdout initially lost the actual error reason — "exit status 1" vs the real "unable to find the specified image" message)
+- `fmt.Errorf("...: %v", err)` to wrap errors with context rather than replacing them
+
+### Trivy integration
+- `exec.Command("trivy", "image", "--format", "json", ...)`, parse into structs matching Trivy's real JSON schema (`Results[].Vulnerabilities[]`, fields: `VulnerabilityID`, `Severity`, `PkgName`)
+- Threshold: any single CRITICAL finding fails the whole check (strict, matches consecutiveErrorLimit=1-style fail-fast pattern elsewhere in the project; may want configurable per-environment later)
+- Verified real scan against `argoproj/rollouts-demo:blue`: 5 CRITICAL, 53 HIGH — all in `stdlib` (image built with outdated Go compiler, not app-code bugs — a reminder that "vulnerable" doesn't always mean "insecure code written")
+- Verified fail-closed path: nonexistent image → Trivy exits non-zero → captured via stderr → clear, specific error surfaced, not a silent pass
+
+### Kyverno integration
+- **Design point**: Kyverno's normal mode is *admission-time* blocking; project needs *re-check of already-running* pods at canary-check time → used `background: true` scanning mode instead, which continuously evaluates existing resources and writes `PolicyReport` objects queryable anytime
+- **`validationFailureAction: Audit`**, not `Enforce` — deliberate: don't want Kyverno independently blocking pod creation at the K8s API level as a second, uncoordinated enforcement point outside analysis-runner's designed flow
+- **Real bug caught**: initial policy used `=(runAsNonRoot): true` (conditional anchor) — this means "IF present, validate; if absent, skip (counts as pass)" — backwards from what's needed. Every pod showed 100% pass despite none setting the field, because the check was being silently skipped, not satisfied. Fixed by removing the anchor (bare field requires presence + match). **Lesson: a security policy that only checks *when a field happens to be set* can produce a false "all clear" that looks identical to genuine compliance — worth double-checking any policy's actual enforcement, not just its pass/fail dashboard.**
+- **PolicyReport → Pod matching**: initially guessed at a `kyverno.io/resource.name` label (wrong — didn't exist). Correct mechanism: standard Kubernetes `ownerReferences` field on the PolicyReport object, linking back to the exact Pod (`kind: Pod`, `name: <pod-name>`) — a first-class K8s mechanism, not Kyverno-specific.
+- Currently shells out to `kubectl` for both pod lookup and PolicyReport fetch (matches existing os/exec pattern) — noted as a deliberate simplification; a native Kubernetes Go client library is the more idiomatic long-term approach, planned as a future refactor.
+
+### Open design question — error handling change
+Changed Trivy's hard-error path: instead of returning HTTP 500 immediately (which would abort the whole request and never report Kyverno's result), an internal tool failure now surfaces as an explicit `checks.trivy.status: "fail"` within a normal 200 response. Tradeoff: keeps full checks breakdown visible for debugging even when one sub-check errors, but means Argo Rollouts' `Error`/`consecutiveErrorLimit` mechanism now only triggers when analysis-runner itself is completely unreachable — an internal tool failure (Trivy crashes, Kyverno unreachable) surfaces as a clean "fail" rather than an "Error" state. Need to decide if this is actually the desired behavior, or if certain internal failures (e.g., Trivy DB completely corrupted vs. a single scan failing) should still propagate as a hard error.
+
+### Not yet done
+- [ ] cosign/Rekor verification (third check)
+- [ ] Containerize analysis-runner (Dockerfile), test running as an actual pod — note: no local Docker socket inside a typical pod, Trivy will need to reach the registry remotely, not rely on local docker/containerd sockets like it did on the Ubuntu host
+- [ ] Real RBAC scoping for analysis-runner's ServiceAccount (currently running locally with your own kubectl credentials — full access, not the least-privilege Role from the original architecture doc)
