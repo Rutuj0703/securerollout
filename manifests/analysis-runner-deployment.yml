@@ -1,0 +1,36 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: analysis-runner
+  namespace: demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: analysis-runner
+  template:
+    metadata:
+      labels:
+        app: analysis-runner
+    spec:
+      serviceAccountName: analysis-runner-sa
+      containers:
+        - name: analysis-runner
+          image: analysis-runner:local
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 8081
+
+---
+
+kind: Service
+apiVersion: v1
+metadata:
+  name: analysis-runner
+  namespace: demo
+spec:
+  selector:
+    app: analysis-runner
+  ports:
+    - port: 8081
+      targetPort: 8081

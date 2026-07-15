@@ -115,9 +115,39 @@ Keyless signing permanently records the signer's OIDC identity (incl. email) in 
 ### Milestone: all three checks (Trivy, Kyverno, cosign) working together
 First working end-to-end response combining all three, against real signed/unsigned/vulnerable images — confirms analysis-runner's core logic is complete. Verified mixed result: Trivy fail + Kyverno fail + cosign pass → overall_status correctly "fail".
 
+## Session 5 — Containerization, RBAC, in-cluster deployment
+
+### Multi-stage Docker build
+- Stage 1 (`golang:1.23-bookworm`): compiles the Go binary
+- Stage 2 (`debian:bookworm-slim`): minimal runtime, installs trivy/cosign/kubectl CLIs, copies in ONLY the compiled binary from stage 1 via `COPY --from=builder` — Go compiler/toolchain never present in final image
+- Image size: ~475MB (three bundled CLI tools account for most of this)
+
+### Kind image loading
+- Kind clusters don't share the host's Docker image cache — `analysis-runner:local` had to be explicitly loaded onto all 3 nodes via `kind load docker-image`
+- Deployment uses `imagePullPolicy: Never` since the image only exists locally (not in any registry) — without this, Kubernetes defaults to trying (and failing) to pull from Docker Hub
+
+### RBAC (least-privilege, matches original architecture doc)
+- `ServiceAccount` (analysis-runner-sa) + namespace-scoped `Role` (not ClusterRole) + `RoleBinding`, all in `demo` namespace
+- Role grants only `get`/`list` on `pods` and `policyreports` (`wgpolicyk8s.io` API group — a CNCF-standard schema, not Kyverno-specific) — no writes, no other resource types, no secrets access
+- `serviceAccountName: analysis-runner-sa` in the pod spec is what actually mounts the ServiceAccount's token into the pod, enabling in-cluster API access — this is the concrete mechanism, not just an RBAC concept on paper
+
+### Proof: local vs in-cluster credential behavior
+- `docker run` locally (no Kubernetes context at all): Trivy + cosign worked fine (registry access only, no K8s dependency); Kyverno failed cleanly with `connection refused to localhost:8080` — kubectl's default fallback with zero configured access. Clean, honest failure — not a false pass.
+- Deployed as a real pod with `analysis-runner-sa`: same Kyverno check now succeeds, using the automatically-mounted ServiceAccount token — no kubeconfig file needed anywhere, this is Kubernetes' standard in-cluster auth mechanism.
+- This confirms the whole credential chain end-to-end: RBAC Role → ServiceAccount → mounted token → kubectl automatically uses it → Kyverno check succeeds with least-privilege access only.
+
+### Milestone: analysis-runner fully running inside the cluster
+First real, in-cluster (not local dev) execution of all three checks together, using genuine least-privilege RBAC — this is the actual production-shaped version of the service, not a local approximation.
+
+### Repo structure correction
+`manifests/` was briefly created inside `services/analysis-runner/` by mistake — moved to project root to match planned structure (`manifests/` = K8s resource definitions, `services/` = application source code, kept separate deliberately).
+
+### Still remaining
+- [ ] Wire the real AnalysisTemplate to point at `http://analysis-runner.demo.svc.cluster.local:8081/check` instead of the mock — this is the last piece connecting the whole system end-to-end
+- [ ] CI pipeline, ArgoCD GitOps
+- [ ] NetworkPolicy, mTLS, tighter RBAC review
+- [ ] Grafana dashboard, chaos testing
 ### Remaining before this is genuinely production-shaped
-- [ ] Containerize analysis-runner (Dockerfile) — must include trivy, cosign, kubectl binaries in the image alongside the Go binary, since all three are shelled out to
-- [ ] Real RBAC (ServiceAccount + Role) — currently running with full local kubectl access, not least-privilege
 - [ ] Wire the real AnalysisTemplate (mock-security-check) to point at analysis-runner's actual /check endpoint instead of the mock
 - [ ] Replace placeholder image-digest arg with real CI/GitOps-injected value
 - [ ] Decide/tune consecutiveErrorLimit etc. against real observed latency of a combined Trivy+Kyverno+cosign call (currently untested — likely several seconds combined, especially Trivy's DB-backed scan)
