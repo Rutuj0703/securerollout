@@ -11,7 +11,7 @@ spec:
         - setWeight: 20
         - analysis:
             templates:
-              - templateName: mock-security-check
+              - templateName: security-check
             args:
               - name: image-digest
                 value: "sha256:placeholder1234567890abcdef"

@@ -142,8 +142,23 @@ First real, in-cluster (not local dev) execution of all three checks together, u
 ### Repo structure correction
 `manifests/` was briefly created inside `services/analysis-runner/` by mistake — moved to project root to match planned structure (`manifests/` = K8s resource definitions, `services/` = application source code, kept separate deliberately).
 
+## Session 6 — End-to-end connection: real AnalysisTemplate → real analysis-runner
+
+### The milestone
+Renamed `mock-security-check` → `security-check`, pointed the real AnalysisTemplate at `analysis-runner.demo.svc.cluster.local:8081/check` (jsonPath corrected to `{$.overall_status}`, matching analysis-runner's actual top-level response field, not the mock's flat `status`).
+
+Triggered a real canary rollout (`argoproj/rollouts-demo:yellow`) through the complete real pipeline for the first time:
+Rollout → setWeight:20 → real AnalysisRun created → calls real analysis-runner pod → runs real Trivy scan + real Kyverno PolicyReport check + real cosign verify → returns overall_status: fail → Argo Rollouts automatically aborts and rolls back.
+
+Result: `RolloutAborted: Metric "security-check" assessed Failed due to failed (1) > failureLimit (0)`
+
+This is the project's core thesis, proven end-to-end: a canary can be automatically rolled back purely due to a security regression, independent of SLO/performance metrics — closing the exact gap identified in the original problem statement (standard canary tooling gates on performance only, allowing a version with a critical CVE, policy violation, or bad signature straight through to 100%).
+
+### What's now real vs still simulated
+- Real: Trivy scan-by-digest, Kyverno live policy check, cosign/Rekor verification, Argo Rollouts canary + AnalysisRun mechanics, RBAC/ServiceAccount-scoped in-cluster execution, automatic rollback on security failure
+- Still simulated/manual: image-digest is a hardcoded placeholder (no CI pipeline yet generating it), signing/scanning happens manually rather than as part of a build pipeline, no ArgoCD GitOps sync
+
 ### Still remaining
-- [ ] Wire the real AnalysisTemplate to point at `http://analysis-runner.demo.svc.cluster.local:8081/check` instead of the mock — this is the last piece connecting the whole system end-to-end
 - [ ] CI pipeline, ArgoCD GitOps
 - [ ] NetworkPolicy, mTLS, tighter RBAC review
 - [ ] Grafana dashboard, chaos testing

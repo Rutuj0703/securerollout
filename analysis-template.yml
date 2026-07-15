@@ -1,7 +1,7 @@
 kind: AnalysisTemplate
 apiVersion: argoproj.io/v1alpha1
 metadata:
-  name: mock-security-check
+  name: security-check
   namespace: demo
 spec:
   args:
@@ -16,7 +16,7 @@ spec:
       failureCondition: "result == 'fail'"
       provider:
         web:
-          url: "http://mock-check.demo.svc.cluster.local:8080"
+          url: "http://analysis-runner.demo.svc.cluster.local:8081/check"
           method: POST
           body: '{"image_digest": "{{args.image-digest}}", "namespace": "{{args.namespace}}", "pod_template_hash": "{{args.pod-hash}}"}'
-          jsonPath: "{$.status}"
+          jsonPath: "{$.overall_status}"
