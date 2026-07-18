@@ -158,6 +158,21 @@ This is the project's core thesis, proven end-to-end: a canary can be automatica
 - Real: Trivy scan-by-digest, Kyverno live policy check, cosign/Rekor verification, Argo Rollouts canary + AnalysisRun mechanics, RBAC/ServiceAccount-scoped in-cluster execution, automatic rollback on security failure
 - Still simulated/manual: image-digest is a hardcoded placeholder (no CI pipeline yet generating it), signing/scanning happens manually rather than as part of a build pipeline, no ArgoCD GitOps sync
 
+## Design note — handling unfixable CVEs (not yet implemented)
+
+### The problem
+Fail-closed on any CRITICAL CVE is correct as a default, but some CVEs have no available fix (Trivy `Status: affected`, `fix_deferred`, `will_not_fix` — vs `fixed`, which is genuinely actionable). A gate that blocks forever with no legitimate override doesn't improve security — it trains teams to bypass or disable the gate entirely (worse than no gate, since it creates false confidence that checks are still happening).
+
+### Design: per-deployment allowlist ConfigMap, not a code-level bypass
+- Each user/team maintains their own ConfigMap (e.g. `security-gate-allowlist`) listing explicitly accepted CVE IDs, each with a required justification, approver, and expiry/review date
+- analysis-runner reads this ConfigMap at check-time; only CRITICAL findings NOT on the (non-expired) allowlist fail the gate
+- Response `reason` field must explicitly state which CVEs were found vs. accepted-and-excluded — never silently hidden (same principle as the Kyverno anchor bug: a check that can silently no-op is dangerous even when the underlying decision was reasonable)
+
+### Key guardrail: no auto-acceptance
+Trivy's own `Status` field (`fixed` vs `affected`/`fix_deferred`/`will_not_fix`) is used to classify findings automatically — but "no fix available" is never auto-added to the allowlist. `will_not_fix` means "no patch coming," not "safe" — exploitability still requires human judgment (is the vulnerable code path actually reachable in how we use this package?). analysis-runner can generate a ready-to-review candidate allowlist entry (CVE ID, status, pre-filled template) to reduce tedium, but committing it to the allowlist remains a deliberate human action requiring a written justification — never automatic.
+
+### Status: designed, not yet built. Planned for a dedicated session — touches core Trivy evaluation logic in analysis-runner and deserves focused implementation + testing, not a rushed addition.
+
 ### Still remaining
 - [ ] CI pipeline, ArgoCD GitOps
 - [ ] NetworkPolicy, mTLS, tighter RBAC review
