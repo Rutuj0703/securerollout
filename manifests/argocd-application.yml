@@ -1,0 +1,15 @@
+kind: Application
+apiVersion: argoproj.io/v1alpha1
+metadata:
+  name: securerollout-demo
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/Rutuj0703/securerollout.git
+    targetRevision: main
+    path: manifests
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo
+  syncPolicy: {}

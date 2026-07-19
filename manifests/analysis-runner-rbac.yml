@@ -18,6 +18,10 @@ rules:
   - apiGroups: ["wgpolicyk8s.io"]
     resources: ["policyreports"]
     verbs: ["get","list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+    resourceNames: ["security-gate-allowlist"]
 
 ---
 kind: RoleBinding

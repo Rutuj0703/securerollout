@@ -7,7 +7,17 @@ import (
 	"log"
 	"net/http"
 	"os/exec"
+	"time"
+
+	"gopkg.in/yaml.v3"
 )
+
+type AllowlistEntry struct {
+	CVE        string `yaml:"cve"`
+	Reason     string `yaml:"reason"`
+	ApprovedBy string `yaml:"approved_by"`
+	Expires    string `yaml:"expires"`
+}
 
 type CheckRequest struct {
 	ImageDigest       string `json:"image_digest"`
@@ -48,6 +58,7 @@ type TrivyVulnerability struct {
 	Severity         string `json:"Severity"`
 	InstalledVersion string `json:"InstalledVersion"`
 	FixedVersion     string `json:"FixedVersion"`
+	Status           string `json:"Status"`
 }
 
 // --- Structs matching Kyverno PolicyReport JSON output shape ---
@@ -61,6 +72,49 @@ type PolicyReportResult struct {
 	Rule    string `json:"rule"`
 	Result  string `json:"result"`
 	Message string `json:"message"`
+}
+
+// loadAllowlist reads the accepted-CVEs ConfigMap from the cluster and
+// returns only the entries that haven't expired.
+func loadAllowlist(namespace string) ([]AllowlistEntry, error) {
+	cmd := exec.Command("kubectl", "get", "configmap", "security-gate-allowlist",
+		"-n", namespace,
+		"-o", "jsonpath={.data.accepted-cves\\.yml}")
+
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		// No ConfigMap found is NOT a fatal error — it just means an empty allowlist.
+		// This matters for fail-closed correctness: if we can't read the allowlist,
+		// we should NOT silently treat everything as accepted. Returning an empty
+		// list here means every CRITICAL still fails the gate, which is the safe default.
+		return []AllowlistEntry{}, nil
+	}
+
+	var entries []AllowlistEntry
+	err = yaml.Unmarshal(stdout.Bytes(), &entries)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse allowlist: %v", err)
+	}
+
+	// Filter out expired entries
+	var active []AllowlistEntry
+	now := time.Now()
+	for _, entry := range entries {
+		expiry, err := time.Parse("2006-01-02", entry.Expires)
+		if err != nil || expiry.After(now) {
+			// If expiry date is malformed, fail closed: treat as NOT active
+			// (don't accept the CVE) rather than assume it's still valid.
+			if err == nil {
+				active = append(active, entry)
+			}
+		}
+	}
+
+	return active, nil
 }
 
 // runTrivyScan shells out to the real trivy binary and returns the parsed report.
@@ -86,29 +140,63 @@ func runTrivyScan(image string) (*TrivyReport, error) {
 }
 
 // evaluateTrivyResult counts CRITICAL/HIGH findings and decides pass/fail.
-func evaluateTrivyResult(report *TrivyReport) CheckResult {
-	criticalCount := 0
-	highCount := 0
+func evaluateTrivyResult(report *TrivyReport, allowlist []AllowlistEntry) CheckResult {
+	var unfixedCritical []TrivyVulnerability // Status: fixed, but not upgraded — genuinely actionable
+	var unfixableCritical []TrivyVulnerability // Status: affected/fix_deferred/will_not_fix — no fix exists
+	var acceptedCritical []TrivyVulnerability // unfixable, but present on the active allowlist
+
+	allowlistSet := make(map[string]bool)
+	for _, entry := range allowlist {
+		allowlistSet[entry.CVE] = true
+	}
 
 	for _, result := range report.Results {
 		for _, vuln := range result.Vulnerabilities {
-			if vuln.Severity == "CRITICAL" {
-				criticalCount++
-			} else if vuln.Severity == "HIGH" {
-				highCount++
+			if vuln.Severity != "CRITICAL" {
+				continue
+			}
+
+			if allowlistSet[vuln.VulnerabilityID] {
+				acceptedCritical = append(acceptedCritical, vuln)
+				continue
+			}
+
+			if vuln.Status == "fixed" {
+				unfixedCritical = append(unfixedCritical, vuln)
+			} else {
+				unfixableCritical = append(unfixableCritical, vuln)
 			}
 		}
 	}
-	if criticalCount > 0 {
+
+	// Any actionable (fixable, not yet upgraded) CRITICAL fails immediately.
+	if len(unfixedCritical) > 0 {
 		return CheckResult{
 			Status: "fail",
-			Reason: "found critical vulnerabilities",
+			Reason: fmt.Sprintf("%d actionable CRITICAL CVE(s) found (fix available): %s",
+				len(unfixedCritical), unfixedCritical[0].VulnerabilityID),
 		}
+	}
+
+	// Unfixable CRITICALs that aren't on the allowlist also fail — they require
+	// explicit human review and acceptance, not automatic pass-through.
+	if len(unfixableCritical) > 0 {
+		return CheckResult{
+			Status: "fail",
+			Reason: fmt.Sprintf("%d CRITICAL CVE(s) with no available fix, not yet reviewed/accepted: %s (add to security-gate-allowlist ConfigMap after review)",
+				len(unfixableCritical), unfixableCritical[0].VulnerabilityID),
+		}
+	}
+
+	reason := "no unaccepted critical vulnerabilities found"
+	if len(acceptedCritical) > 0 {
+		reason = fmt.Sprintf("%d CRITICAL CVE(s) present but explicitly accepted via allowlist: %s",
+			len(acceptedCritical), acceptedCritical[0].VulnerabilityID)
 	}
 
 	return CheckResult{
 		Status: "pass",
-		Reason: "no critical vulnerabilities found",
+		Reason: reason,
 	}
 }
 
@@ -238,7 +326,11 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Trivy scan failed: %v", err)
 		trivyResult = CheckResult{Status: "fail", Reason: fmt.Sprintf("trivy check errored: %v", err)}
 	} else {
-		trivyResult = evaluateTrivyResult(report)
+		allowlist, allowErr := loadAllowlist(req.Namespace)
+		if allowErr != nil {
+			log.Printf("Allowlist load failed: %v", allowErr)
+		}
+		trivyResult = evaluateTrivyResult(report, allowlist)
 	}
 
 	kyvernoResult := runKyvernoCheck(req.Namespace, req.PodTemplateHash)

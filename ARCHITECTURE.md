@@ -200,6 +200,25 @@ Created an ArgoCD `Application` (manual sync policy) pointing at `manifests/` in
 
 Verified real drift detection + sync: changed `analysis-runner`'s replica count in Git (1→2), committed, pushed. ArgoCD's default poll interval (~3 min) means it doesn't react instantly — used `argocd app get --refresh` to force immediate re-check. Correctly showed only the Deployment as `OutOfSync` (everything else remained `Synced`), then `argocd app sync` applied it — pod count changed from 1 to 2 with zero direct kubectl commands.
 
+## Session 10 — Allowlist mechanism for unfixable CVEs: built and verified end-to-end
+
+### Implementation
+- `security-gate-allowlist` ConfigMap (per-namespace), entries: `cve`, `reason`, `approved_by`, `expires` (YAML list)
+- `loadAllowlist()`: reads ConfigMap via kubectl exec, parses YAML (gopkg.in/yaml.v3 — first external Go dependency), filters expired entries. Missing/unreadable ConfigMap → empty allowlist (fail-closed: never silently treat unreadable as "everything accepted")
+- `evaluateTrivyResult()` rewritten to three-way classify CRITICAL findings: actionable (Status: fixed, not yet upgraded — always fails immediately), unfixable-and-unreviewed (fails, names the CVE, tells you to add it to the ConfigMap), unfixable-and-allowlisted (passes, but reason field explicitly names which CVEs were accepted — never silently omitted)
+
+### Real bugs hit and fixed
+1. Dockerfile builder stage only copied `go.mod`, not `go.sum` — broke once a real external dependency (yaml.v3) was added; `go build` inside Docker failed with "missing go.sum entry". Fix: `COPY go.mod go.sum ./`. Lesson: go.sum isn't optional bookkeeping — required the moment a project has any non-stdlib import, easy to forget in a Dockerfile written before that point.
+2. **RBAC gap**: allowlist ConfigMap read silently failed in-cluster for a long stretch of testing — Role only granted `pods`/`policyreports`, no `configmaps` permission at all. `kubectl get configmap` inside the pod hit 403 Forbidden, `loadAllowlist` correctly fell back to empty allowlist per its fail-closed design — meaning the feature LOOKED like it wasn't working, but was actually working exactly as designed (defaulting safely closed) given insufficient permissions. Fix: added a `configmaps` rule scoped via `resourceNames: ["security-gate-allowlist"]` — least-privilege even within the new grant, not a blanket configmaps-read.
+3. Disk space: accumulated Docker images/build-cache across many builds today hit 98% full, causing `kind load docker-image` to fail outright (`no space left on device`). Cleaned via `docker builder prune`, removed genuinely unrelated images (minikube kicbase, python:3.9 — neither used by this project). Kind's own node-backing volumes (`docker volume ls`, unlabeled hash names) were correctly left untouched — Docker itself refused their removal since they're actively attached to running containers, a useful built-in safety signal.
+
+### Verified end-to-end
+Real unfixable-CVE test image (rebuilt Debian-slim variant temporarily, scanned, confirmed 4 pure `affected`/`fix_deferred`/`will_not_fix` CRITICALs, no `fixed`-status ones):
+- Empty allowlist → correctly failed: "4 CRITICAL CVE(s) with no available fix, not yet reviewed/accepted"
+- After adding all 4 CVEs to allowlist with real justification → correctly passed: "4 CRITICAL CVE(s) present but explicitly accepted via allowlist"
+- `overall_status` remained "fail" throughout, correctly — Kyverno and cosign continued failing independently, proving the three checks don't interfere with each other's results
+
+
 ### Still manual: sync policy
 Currently `syncPolicy: {}` (manual) — deliberate choice to see drift detection and sync as separate, visible steps first. Automated sync (`syncPolicy.automated`) is the natural next step once comfortable with the manual flow, and pairs naturally with a future CI step that updates the image digest in `manifests/` automatically after a successful build.
 

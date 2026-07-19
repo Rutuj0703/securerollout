@@ -1,0 +1,23 @@
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: security-gate-allowlist
+  namespace: demo
+data:
+  accepted-cves.yml: |
+    - cve: CVE-2026-13221
+      reason: "No upstream fix available (Trivy status: affected). perl-base is unused OS tooling not invoked by analysis-runner's own code."
+      approved_by: "rutuj"
+      expires: "2026-12-31"
+    - cve: CVE-2026-42496
+      reason: "Debian fix_deferred. perl-archive-tar path traversal not reachable — analysis-runner never processes tar archives."
+      approved_by: "rutuj"
+      expires: "2026-12-31"
+    - cve: CVE-2026-8376
+      reason: "No upstream fix available (Trivy status: affected). perl heap overflow requires 32-bit build; image is amd64."
+      approved_by: "rutuj"
+      expires: "2026-12-31"
+    - cve: CVE-2023-45853
+      reason: "Debian will_not_fix. zlib zipOpenNewFileInZip4_6 function not called anywhere in analysis-runner's dependency chain."
+      approved_by: "rutuj"
+      expires: "2026-12-31"
