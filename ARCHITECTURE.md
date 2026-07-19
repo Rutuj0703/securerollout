@@ -173,16 +173,45 @@ Trivy's own `Status` field (`fixed` vs `affected`/`fix_deferred`/`will_not_fix`)
 
 ### Status: designed, not yet built. Planned for a dedicated session — touches core Trivy evaluation logic in analysis-runner and deserves focused implementation + testing, not a rushed addition.
 
+## Session 8 — CI pipeline working end-to-end (with a real debugging lesson)
+
+### Bug: local edits not committed
+CI kept failing on stale content — traced to the Dockerfile fix existing only on local disk (`git status` showed it as modified-but-unstaged) despite believing it had been pushed. The commit that referenced the fix in ARCHITECTURE.md had gone through, but the actual Dockerfile change hadn't. **Lesson: `git status`/`git log` are the ground truth for "did this actually get pushed" — a commit message describing a change doesn't guarantee the change itself was staged and included in that commit.**
+
+### Milestone: full CI pipeline green, GitHub-Actions-signed image
+Build → push by digest → Trivy scan-by-digest (0 CRITICAL, passing) → cosign sign-by-digest, fully automated on every push to `services/analysis-runner/**`.
+
+Verified the resulting signature's identity is the CI workflow itself, not a personal identity:
+- Issuer: `https://token.actions.githubusercontent.com`
+- Subject: `https://github.com/Rutuj0703/securerollout/.github/workflows/ci.yml@refs/heads/main`
+
+This is a stronger supply-chain guarantee than manual signing: a human cannot produce a validly-signed image without it having passed through the Trivy gate first, since signing is the pipeline's last step and only runs if the scan step succeeded. Direct proof of the "who verifies the verifier" mitigation from the original threat model — trust is anchored to the pipeline's identity, not an individual's.
+
+## Session 9 — ArgoCD GitOps wiring
+
+### Setup friction (real debugging, worth remembering)
+- `argocd login localhost:8080` via port-forward repeatedly failed with `gRPC connection not ready: context deadline exceeded`, despite plain `curl -k https://localhost:8080` succeeding (confirmed server itself was healthy/reachable). Root cause: `kubectl port-forward` can struggle with gRPC's long-lived multiplexed streaming even when simple HTTP requests work fine through the same tunnel — different connection behavior, same port.
+- Fix: `argocd login --core` — bypasses argocd-server/port-forward entirely, talks directly to the Kubernetes API using existing kubectl credentials, since ArgoCD Applications are just Custom Resources under the hood. No password needed at all in this mode.
+- `--core` mode then failed with `configmap "argocd-cm" not found` — traced to kubectl context having no default namespace set, so the CLI was looking in `default` instead of `argocd`. Fixed via `kubectl config set-context --current --namespace=argocd`.
+- Also noticed `argocd-applicationset-controller` restarting repeatedly (6x in 20 min) — likely resource pressure from running ArgoCD's full component set on a local Kind cluster already hosting other workloads. Not yet a blocker, but a real signal about local dev resource limits worth remembering (ties back to Session 1's note on Kind's shared-kernel resource constraints).
+
+### GitOps loop proven end-to-end
+Created an ArgoCD `Application` (manual sync policy) pointing at `manifests/` in the GitHub repo, targeting the `demo` namespace. Took over management of resources originally created via manual `kubectl apply` — first sync only added ArgoCD's own tracking-id labels (no functional diff), confirming clean adoption.
+
+Verified real drift detection + sync: changed `analysis-runner`'s replica count in Git (1→2), committed, pushed. ArgoCD's default poll interval (~3 min) means it doesn't react instantly — used `argocd app get --refresh` to force immediate re-check. Correctly showed only the Deployment as `OutOfSync` (everything else remained `Synced`), then `argocd app sync` applied it — pod count changed from 1 to 2 with zero direct kubectl commands.
+
+### Still manual: sync policy
+Currently `syncPolicy: {}` (manual) — deliberate choice to see drift detection and sync as separate, visible steps first. Automated sync (`syncPolicy.automated`) is the natural next step once comfortable with the manual flow, and pairs naturally with a future CI step that updates the image digest in `manifests/` automatically after a successful build.
+
+### Not yet connected: rollout.yml, analysis-template.yml
+These currently live at project root, not under `manifests/` — meaning ArgoCD's `securerollout-demo` Application does NOT yet manage the actual Rollout or AnalysisTemplate, only analysis-runner's own supporting resources (RBAC, Deployment, Service). Moving these into `manifests/` (or a separate ArgoCD Application) is required before GitOps genuinely covers the full system, including the canary/security-gate mechanism itself.
+
 ### Still remaining
-- [ ] CI pipeline, ArgoCD GitOps
 - [ ] NetworkPolicy, mTLS, tighter RBAC review
 - [ ] Grafana dashboard, chaos testing
 ### Remaining before this is genuinely production-shaped
-- [ ] Wire the real AnalysisTemplate (mock-security-check) to point at analysis-runner's actual /check endpoint instead of the mock
-- [ ] Replace placeholder image-digest arg with real CI/GitOps-injected value
 - [ ] Decide/tune consecutiveErrorLimit etc. against real observed latency of a combined Trivy+Kyverno+cosign call (currently untested — likely several seconds combined, especially Trivy's DB-backed scan)
 ### Not yet done
-- [ ] Containerize analysis-runner (Dockerfile), test running as an actual pod — note: no local Docker socket inside a typical pod, Trivy will need to reach the registry remotely, not rely on local docker/containerd sockets like it did on the Ubuntu host
 - [ ] Real RBAC scoping for analysis-runner's ServiceAccount (currently running locally with your own kubectl credentials — full access, not the least-privilege Role from the original architecture doc)
 
 
