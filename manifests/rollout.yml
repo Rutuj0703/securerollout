@@ -1,7 +1,7 @@
 kind: Rollout
 apiVersion: argoproj.io/v1alpha1
 metadata:
-  name: demo-rollout
+  name: target-app
   namespace: demo
 spec:
   replicas: 5
@@ -14,7 +14,7 @@ spec:
               - templateName: security-check
             args:
               - name: image-digest
-                value: "sha256:placeholder1234567890abcdef"
+                value: "rutujkoli/target-app@sha256:9a66d59caca51a34cdfddc70107da162e2e9e0fb8425ff29264536c1ba52dafd"
               - name: namespace
                 valueFrom:
                   fieldRef:
@@ -27,15 +27,16 @@ spec:
         - setWeight: 100
   selector:
     matchLabels:
-      app: demo-rollout
+      app: target-app
   template:
     metadata:
       labels:
-        app: demo-rollout
+        app: target-app
     spec:
       containers:
-        - name: demo-rollout
-          image: argoproj/rollouts-demo:blue
+        - name: target-app
+          image: rutujkoli/target-app@sha256:d35b16f5b6d535e81be4e219c385a034c34c569c9d005f08ea2802857f192ef2
+          ports:
           ports:
           -  containerPort: 8080
       

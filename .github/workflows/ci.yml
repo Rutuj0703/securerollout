@@ -7,7 +7,7 @@ on:
       - 'services/analysis-runner/**'
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:

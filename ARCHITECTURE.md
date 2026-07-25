@@ -218,6 +218,26 @@ Real unfixable-CVE test image (rebuilt Debian-slim variant temporarily, scanned,
 - After adding all 4 CVEs to allowlist with real justification → correctly passed: "4 CRITICAL CVE(s) present but explicitly accepted via allowlist"
 - `overall_status` remained "fail" throughout, correctly — Kyverno and cosign continued failing independently, proving the three checks don't interfere with each other's results
 
+## Session 11 — Real target-app: closing the "wrong artifact" gap
+
+### The gap identified
+Up to this point, `demo-rollout` deployed `argoproj/rollouts-demo` (Argo's public demo image) — never built, owned, or scanned by this project. Meanwhile CI only built/scanned/signed analysis-runner's own image. These were never the same artifact: the Rollout deployed one thing, CI produced another, and the `image-digest` analysis arg was a static placeholder never fed by either. "Wire CI's digest into rollout.yml" would have closed a loop connecting the wrong two things.
+
+### Fix: built target-app, a minimal genuinely-owned workload
+- Go HTTP service (`/health`, `/`), version injected at build time via `-ldflags "-X main.Version=..."` — no hardcoded version, same mechanism CI will use per-build later (Docker `ARG VERSION` → ldflags)
+- Same hardened pattern as analysis-runner from the start: golang:1.25-bookworm builder → gcr.io/distroless/base-debian12 final. Verified 0 CRITICAL CVEs immediately (no repeat of analysis-runner's earlier CVE-discovery cycle, since lessons were applied upfront)
+- Renamed the Rollout from `demo-rollout` → `target-app` throughout (metadata.name, selector labels, pod template labels, container name) for clarity — required delete+recreate, not an in-place rename (Kubernetes objects are identified by name)
+
+### Proven end-to-end with the real, owned artifact
+- v1.0.0: built, pushed, manually signed with cosign — deployed as `target-app`'s initial revision (first-ever deploy on a new Rollout name skips canary steps, consistent with the earlier-learned limitation)
+- v1.0.1: built, pushed, deliberately left UNSIGNED — triggered via `kubectl argo rollouts set image`, with the analysis args' `image-digest` manually updated to match the new digest
+- Result: real AnalysisRun ran against the real new digest, cosign check correctly failed (`no signatures found`), `RolloutAborted`, revision 2 scaled down, revision 1 (signed v1.0.0) remained stable — the project's actual thesis, proven against a real, owned, CI-buildable application for the first time, not a borrowed demo image
+
+### Confirmed remaining gap: image-digest still manually maintained
+Had to hand-edit `manifests/rollout.yml`'s `image-digest` analysis arg to match the new image tag/digest before the test worked correctly — this is exactly the manual step CI should eventually own (build target-app → capture real digest → write it into `manifests/rollout.yml`'s both the container image field AND the analysis arg → commit → ArgoCD syncs). Not yet automated.
+
+### Debugging note
+Checked rollout status once right after triggering the update and misread an intermediate/stale-looking snapshot as evidence something had gone wrong — the abort had actually already resolved correctly by then (21h-old timestamps on re-check). Lesson: a single `get rollout` call is a point-in-time snapshot, not proof of final state, especially checked shortly after triggering a change.
 
 ### Still manual: sync policy
 Currently `syncPolicy: {}` (manual) — deliberate choice to see drift detection and sync as separate, visible steps first. Automated sync (`syncPolicy.automated`) is the natural next step once comfortable with the manual flow, and pairs naturally with a future CI step that updates the image digest in `manifests/` automatically after a successful build.
