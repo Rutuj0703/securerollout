@@ -14,7 +14,7 @@ spec:
               - templateName: security-check
             args:
               - name: image-digest
-                value: "rutujkoli/target-app@sha256:9a66d59caca51a34cdfddc70107da162e2e9e0fb8425ff29264536c1ba52dafd"
+                value: "rutujkoli/target-app@sha256:4521f8d2ae75a88d1f98ce55e8b015bf1ef5867a7bfb3a819a45ed3244cc737f"
               - name: namespace
                 valueFrom:
                   fieldRef:
@@ -35,7 +35,7 @@ spec:
     spec:
       containers:
         - name: target-app
-          image: rutujkoli/target-app@sha256:d35b16f5b6d535e81be4e219c385a034c34c569c9d005f08ea2802857f192ef2
+          image: rutujkoli/target-app@sha256:4521f8d2ae75a88d1f98ce55e8b015bf1ef5867a7bfb3a819a45ed3244cc737f
           ports:
           ports:
           -  containerPort: 8080
