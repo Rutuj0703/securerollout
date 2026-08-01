@@ -245,6 +245,18 @@ Attempted deliberate chaos test (kill analysis-runner pods mid-check); accidenta
 
 Confirms fail-closed behavior holds under a real (if accidental) outage: transient failures produce explicit errors, never silent passes; error tolerance is genuinely enforced, not just configured; recovery is handled cleanly once the dependency returns.
 
+## Session 12 (continued) — Chaos test: Kyverno down, PolicyReport staleness gap found
+
+Scaled `kyverno-background-controller` and `kyverno-reports-controller` to 0. Ran a real check against a genuinely live, currently-running revision (revision:1, digest sha256:4521f8d2..., hash 567cd9fb89).
+
+**Finding: the Kyverno check succeeded and returned a real, correct violation message even with Kyverno fully down.** Root cause: analysis-runner reads the `PolicyReport` object via the K8s API server directly, not via Kyverno itself — the object persists and stays queryable indefinitely, it just stops being refreshed. The check has no mechanism to detect staleness (no timestamp check against a freshness threshold), so a report from before an outage is treated identically to a report from seconds ago.
+
+This is a real, previously-undiscovered gap — not a bug in the sense of incorrect behavior, but a genuine correctness limitation: if a pod's live config changed while Kyverno was down, the check would keep reporting the old (now-wrong) verdict indefinitely.
+
+**Not yet fixed** — documented as a known next step: add a freshness-timestamp check on the PolicyReport (`creationTimestamp`/last-updated field) against a max-staleness threshold, failing closed if exceeded.
+
+Restored Kyverno controllers to 1 replica each after the test; confirmed `kyverno get pods -n kyverno` shows all 4 back to `1/1 Running`.
+
 ### Remaining chaos scenarios not yet tested
 - Kyverno background controller unreachable (scale to 0)
 - analysis-runner Service deleted (vs. pods) — DNS-resolution-specific failure path
