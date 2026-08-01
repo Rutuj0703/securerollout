@@ -10,13 +10,15 @@ spec:
     - name: pod-hash
   metrics:
     - name: security-check
-      interval: 10s
-      count: 3
+      interval: 15s
+      count: 2
+      consecutiveErrorLimit: 2
       successCondition: "result == 'pass'"
       failureCondition: "result == 'fail'"
       provider:
         web:
           url: "http://analysis-runner.demo.svc.cluster.local:8081/check"
           method: POST
+          timeoutSeconds: 30
           body: '{"image_digest": "{{args.image-digest}}", "namespace": "{{args.namespace}}", "pod_template_hash": "{{args.pod-hash}}"}'
           jsonPath: "{$.overall_status}"

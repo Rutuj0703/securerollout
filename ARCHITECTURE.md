@@ -253,6 +253,18 @@ Scaled `kyverno-background-controller` and `kyverno-reports-controller` to 0. Ra
 
 This is a real, previously-undiscovered gap — not a bug in the sense of incorrect behavior, but a genuine correctness limitation: if a pod's live config changed while Kyverno was down, the check would keep reporting the old (now-wrong) verdict indefinitely.
 
+## Session 12 (continued) — Real bug found via chaos testing: reasoned config never actually applied
+
+Re-ran the Service-deletion test to compare against the earlier outage test — abort message showed `consecutiveErrorLimit (4)` (Argo Rollouts' default), not the `2` reasoned through and believed-configured earlier in the project. Checked the live AnalysisTemplate object: `consecutiveErrorLimit` wasn't set at all. Checked the source file: never written there either — `interval` had also silently reverted to `10s` instead of `15s`. The tuning conversation happened; the actual file edit never did.
+
+Fixed via the source file (not a live edit), verified directly against the live object's spec (not just trusting `kubectl apply` succeeded — same verification discipline as the earlier missing-`spec.args` bug).
+
+**Before/after comparison, identical failure scenario (Service deleted), same cluster:**
+- Before: `consecutiveErrors (5) > consecutiveErrorLimit (4)`
+- After: `consecutiveErrors (3) > consecutiveErrorLimit (2)`
+
+Real evidence the intended exposure-time reduction is now actually enforced, not just designed. This is the core value of chaos testing demonstrated directly: verifying the deployed reality matches the reasoned design, not assuming a past decision was correctly implemented.
+
 **Not yet fixed** — documented as a known next step: add a freshness-timestamp check on the PolicyReport (`creationTimestamp`/last-updated field) against a max-staleness threshold, failing closed if exceeded.
 
 Restored Kyverno controllers to 1 replica each after the test; confirmed `kyverno get pods -n kyverno` shows all 4 back to `1/1 Running`.
