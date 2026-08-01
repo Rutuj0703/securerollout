@@ -239,6 +239,18 @@ Had to hand-edit `manifests/rollout.yml`'s `image-digest` analysis arg to match 
 ### Debugging note
 Checked rollout status once right after triggering the update and misread an intermediate/stale-looking snapshot as evidence something had gone wrong — the abort had actually already resolved correctly by then (21h-old timestamps on re-check). Lesson: a single `get rollout` call is a point-in-time snapshot, not proof of final state, especially checked shortly after triggering a change.
 
+## Session 12 — Chaos testing: real analysis-runner outage mid-canary
+
+Attempted deliberate chaos test (kill analysis-runner pods mid-check); accidentally deleted them slightly early, before the intended trigger. Resulting AnalysisRun (`target-app-674747b88-5-1`) captured the full real sequence: 1 successful measurement pre-outage → 3 consecutive `Error` (connection refused) measurements during the outage, exceeding the tuned `consecutiveErrorLimit: 2` → Kubernetes Deployment controller self-healed the pods (~45s) → 1 final genuine `Failed` measurement once reachable again. Rollout stayed aborted/blocked throughout — never promoted during the outage or after.
+
+Confirms fail-closed behavior holds under a real (if accidental) outage: transient failures produce explicit errors, never silent passes; error tolerance is genuinely enforced, not just configured; recovery is handled cleanly once the dependency returns.
+
+### Remaining chaos scenarios not yet tested
+- Kyverno background controller unreachable (scale to 0)
+- analysis-runner Service deleted (vs. pods) — DNS-resolution-specific failure path
+- RBAC revoked mid-flight
+- NetworkPolicy: attempted, found Kind's default CNI (kindnet) does not enforce NetworkPolicy at all — would need cluster recreated with Calico (`disableDefaultCNI: true`) for genuine enforcement. Deferred — real cluster rebuild needed, not done yet.
+
 ### Still manual: sync policy
 Currently `syncPolicy: {}` (manual) — deliberate choice to see drift detection and sync as separate, visible steps first. Automated sync (`syncPolicy.automated`) is the natural next step once comfortable with the manual flow, and pairs naturally with a future CI step that updates the image digest in `manifests/` automatically after a successful build.
 
@@ -253,4 +265,8 @@ These currently live at project root, not under `manifests/` — meaning ArgoCD'
 ### Not yet done
 - [ ] Real RBAC scoping for analysis-runner's ServiceAccount (currently running locally with your own kubectl credentials — full access, not the least-privilege Role from the original architecture doc)
 
-
+to re trigger build:
+echo "# trigger" >> services/target-app/README.md
+git add services/target-app/README.md
+git commit -m "Trigger target-app CD pipeline"
+git push
