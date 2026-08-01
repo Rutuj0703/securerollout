@@ -9,6 +9,9 @@ import (
 	"os/exec"
 	"time"
 
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -74,6 +77,29 @@ type PolicyReportResult struct {
 	Message string `json:"message"`
 }
 
+var (
+	checkResultsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "securerollout_check_results_total",
+			Help: "Total number of check results, labeled by tool and outcome",
+		},
+		[]string{"tool", "status"}, // tool: trivy|kyverno|cosign, status: pass|fail
+	)
+
+	checkDurationSeconds = prometheus.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "securerollout_check_duration_seconds",
+			Help:    "Time taken to complete a full /check request (all three tools)",
+			Buckets: prometheus.DefBuckets, // default buckets: .005 to 10 seconds
+		},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(checkResultsTotal)
+	prometheus.MustRegister(checkDurationSeconds)
+}
+
 // loadAllowlist reads the accepted-CVEs ConfigMap from the cluster and
 // returns only the entries that haven't expired.
 func loadAllowlist(namespace string) ([]AllowlistEntry, error) {
@@ -117,9 +143,27 @@ func loadAllowlist(namespace string) ([]AllowlistEntry, error) {
 	return active, nil
 }
 
+func refreshTrivyDB() {
+	cmd := exec.Command("trivy", "image", "--download-db-only", "--skip-version-check")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		// Fail-closed consideration: don't crash the whole service if this
+		// fails (Kyverno/cosign checks are unaffected and should still work).
+		// Trivy scans will then correctly fail-closed on their own, since
+		// --skip-db-update will error out with no DB present, rather than
+		// silently re-attempting a download during a live request.
+		log.Printf("WARNING: Trivy DB refresh at startup failed: %v, stderr: %s", err, stderr.String())
+		return
+	}
+	log.Println("Trivy DB refreshed successfully at startup")
+}
+
 // runTrivyScan shells out to the real trivy binary and returns the parsed report.
 func runTrivyScan(image string) (*TrivyReport, error) {
-	cmd := exec.Command("trivy", "image", "--format", "json", "--skip-version-check", image)
+	cmd := exec.Command("trivy", "image", "--format", "json", "--skip-version-check","--skip-db-update", image)
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
@@ -310,6 +354,10 @@ func runCosignVerify(imageRef string) CheckResult {
 }
 
 func checkHandler(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	defer func(){
+		checkDurationSeconds.Observe(time.Since(start).Seconds())
+	}()
 	var req CheckRequest
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
@@ -333,8 +381,12 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 		trivyResult = evaluateTrivyResult(report, allowlist)
 	}
 
+	checkResultsTotal.WithLabelValues("trivy", trivyResult.Status).Inc()
+
 	kyvernoResult := runKyvernoCheck(req.Namespace, req.PodTemplateHash)
+	checkResultsTotal.WithLabelValues("kyverno", kyvernoResult.Status).Inc()
 	cosignResult := runCosignVerify(req.ImageDigest)
+	checkResultsTotal.WithLabelValues("cosign", cosignResult.Status).Inc()
 
 	overallStatus := "pass"
 	if trivyResult.Status == "fail" || kyvernoResult.Status == "fail" || cosignResult.Status== "fail"  {
@@ -356,7 +408,9 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	refreshTrivyDB()
 	http.HandleFunc("/check", checkHandler)
+	http.Handle("/metrics", promhttp.Handler())
 	log.Println("analysis-runner listening on :8081")
 	log.Fatal(http.ListenAndServe(":8081", nil))
 }
