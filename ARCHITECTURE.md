@@ -265,6 +265,20 @@ Fixed via the source file (not a live edit), verified directly against the live 
 
 Real evidence the intended exposure-time reduction is now actually enforced, not just designed. This is the core value of chaos testing demonstrated directly: verifying the deployed reality matches the reasoned design, not assuming a past decision was correctly implemented.
 
+## Session 12 (final) — RBAC mid-flight: inconclusive, but revealed a real logging gap
+
+Attempted to catch analysis-runner mid-check while deleting its Role, to observe an in-progress permission revocation. Timing was hard to capture precisely (same challenge as the earliest pod-kill chaos attempt). Checked analysis-runner's logs to reconstruct what happened after the fact — found they only record `"Received check request: ..."`, with no logging of the actual per-check outcome or failure reason. Root cause of a past failure currently can't be reconstructed from logs alone; it requires having captured the live HTTP response at the time.
+
+**Real gap identified**: add structured logging of each check's actual result/reason (not just request receipt) for post-hoc diagnosability. Not yet implemented — noted as a concrete next improvement.
+
+### Chaos-testing session summary (4 scenarios attempted, 3 conclusive)
+1. Pod deletion mid-canary (accidental) — confirmed fail-closed behavior holds through a real outage + recovery
+2. Kyverno fully down — found a real staleness-detection gap (PolicyReports go stale silently, no freshness check)
+3. Service deleted — confirmed DNS-failure path, and in the process found `consecutiveErrorLimit`/`interval` had silently drifted from their reasoned values back to defaults; fixed and verified with before/after comparison
+4. RBAC revoked mid-flight — inconclusive on the original question, but surfaced a real logging/observability gap instead
+
+Three genuine, real findings from one session of deliberate failure-testing — this is exactly the value chaos testing is supposed to provide.
+
 **Not yet fixed** — documented as a known next step: add a freshness-timestamp check on the PolicyReport (`creationTimestamp`/last-updated field) against a max-staleness threshold, failing closed if exceeded.
 
 Restored Kyverno controllers to 1 replica each after the test; confirmed `kyverno get pods -n kyverno` shows all 4 back to `1/1 Running`.
