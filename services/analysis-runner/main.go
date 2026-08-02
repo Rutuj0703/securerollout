@@ -4,16 +4,18 @@ import (
 	"bytes"
 	"fmt"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"os/exec"
 	"time"
-
+	"os"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v3"
 )
+
+var logger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 type AllowlistEntry struct {
 	CVE        string `yaml:"cve"`
@@ -155,10 +157,10 @@ func refreshTrivyDB() {
 		// Trivy scans will then correctly fail-closed on their own, since
 		// --skip-db-update will error out with no DB present, rather than
 		// silently re-attempting a download during a live request.
-		log.Printf("WARNING: Trivy DB refresh at startup failed: %v, stderr: %s", err, stderr.String())
+		logger.Warn("trivy DB refresh at startup failed", "error", err.Error(), "stderr", stderr.String())
 		return
 	}
-	log.Println("Trivy DB refreshed successfully at startup")
+	logger.Info("Trivy DB refreshed successfully at startup")
 }
 
 // runTrivyScan shells out to the real trivy binary and returns the parsed report.
@@ -365,33 +367,45 @@ func checkHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Received check request: digest=%s namespace=%s pod-hash=%s",
-		req.ImageDigest, req.Namespace, req.PodTemplateHash)
+	logger.Info("check request received",
+		"image_digest", req.ImageDigest,
+		"namespace", req.Namespace,
+		"pod_template_hash", req.PodTemplateHash,
+	)
 
 	report, err := runTrivyScan(req.ImageDigest)
 	var trivyResult CheckResult
 	if err != nil {
-		log.Printf("Trivy scan failed: %v", err)
+		logger.Error("Trivy scan errored","error", err.Error())
 		trivyResult = CheckResult{Status: "fail", Reason: fmt.Sprintf("trivy check errored: %v", err)}
 	} else {
 		allowlist, allowErr := loadAllowlist(req.Namespace)
 		if allowErr != nil {
-			log.Printf("Allowlist load failed: %v", allowErr)
+			logger.Warn("allowlist load failed", "error", allowErr.Error())
 		}
 		trivyResult = evaluateTrivyResult(report, allowlist)
 	}
-
+	logger.Info("trivy check result", "status", trivyResult.Status, "reason", trivyResult.Reason)
 	checkResultsTotal.WithLabelValues("trivy", trivyResult.Status).Inc()
-
+	
 	kyvernoResult := runKyvernoCheck(req.Namespace, req.PodTemplateHash)
+	logger.Info("kyverno check result", "status", kyvernoResult.Status, "reason", kyvernoResult.Reason)
 	checkResultsTotal.WithLabelValues("kyverno", kyvernoResult.Status).Inc()
+	
 	cosignResult := runCosignVerify(req.ImageDigest)
+	logger.Info("cosign check result", "status", cosignResult.Status, "reason", cosignResult.Reason)
 	checkResultsTotal.WithLabelValues("cosign", cosignResult.Status).Inc()
 
 	overallStatus := "pass"
 	if trivyResult.Status == "fail" || kyvernoResult.Status == "fail" || cosignResult.Status== "fail"  {
 		overallStatus = "fail"
 	}
+
+	logger.Info("check complete",
+		"overall_status", overallStatus,
+		"image_digest", req.ImageDigest,
+		"duration_seconds", time.Since(start).Seconds(),
+	)
 
 	response := CheckResponse{
 		OverallStatus: overallStatus,
@@ -411,6 +425,9 @@ func main() {
 	refreshTrivyDB()
 	http.HandleFunc("/check", checkHandler)
 	http.Handle("/metrics", promhttp.Handler())
-	log.Println("analysis-runner listening on :8081")
-	log.Fatal(http.ListenAndServe(":8081", nil))
+	logger.Info("analysis-runner listening", "port", 8081)
+	if err := http.ListenAndServe(":8081", nil); err != nil {
+		logger.Error("server failed", "error", err.Error())
+		os.Exit(1)
+	}
 }
