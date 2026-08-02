@@ -310,6 +310,14 @@ Added a PersistentVolumeClaim (2Gi, RWO) and mounted it at Prometheus's `--stora
 Triggered a real canary check post-fix; confirmed correct aggregated pass/fail counts by tool appeared in Prometheus within the expected scrape interval, matching analysis-runner's own `/metrics` output exactly.
 **Current state**: analysis-runner running at 1 replica as a stopgap — trades away redundancy for correct metrics, a known and deliberate simplification for this demo cluster, documented rather than silently accepted.
 
+## Session 14 — Structured logging: closing the observability gap from Session 12
+
+Replaced `log.Printf`/`log.Println` with Go's standard library `log/slog`, JSON output to stdout (Kubernetes captures automatically, no new plumbing needed — and no new dependency, `slog` has been in the stdlib since Go 1.21). Every check now logs, as real structured fields (not embedded in prose text): the incoming request, each tool's individual `status`/`reason`, and a final summary including `overall_status` and `duration_seconds`.
+
+Verified in-cluster via `kubectl logs`: a real check produced 4 distinct, structured JSON log lines — request received, trivy result, kyverno result, cosign result, plus the final summary. This directly closes the gap found during the RBAC mid-flight chaos test (Session 12), where a past failure's actual cause couldn't be reconstructed from logs after the fact.
+
+Bonus real data point captured along the way: full three-tool check duration is consistently 4-8 seconds in practice — comfortably within the tuned 30s `timeoutSeconds` and under the 15s `interval`, confirming real margin exists in the earlier timeout-bug fix (Session 11).
+
 ### Known limitation: Prometheus has no persistent storage
 Confirmed during this session — a Prometheus pod restart (root cause not fully diagnosed, likely correlates with cluster resource pressure seen elsewhere) wiped all previously-scraped data back to zero, since no PersistentVolume is configured. Fine for demonstrating the mechanism works; not suitable as genuine historical/audit data without adding a PVC.
 
