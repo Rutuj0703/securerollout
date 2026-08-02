@@ -286,13 +286,28 @@ Three genuine, real findings from one session of deliberate failure-testing — 
 - Minimal hand-rolled Prometheus (not full kube-prometheus-stack, to keep footprint down and understand every piece) scraping analysis-runner + Argo Rollouts' built-in metrics (`rollout_info`, `rollout_info_replicas_*`, `analysis_run_info` — free, no code required)
 - Grafana, both data source and dashboard fully provisioned via ConfigMap (GitOps-consistent, no manual UI setup) — panels: rollout phase, replica counts, security check results by tool, check duration p50/p95, AnalysisRun history table, all-time totals
 
+
 ### Real bug found: Prometheus scraping a load-balanced Service, not individual pods
 Metrics existed correctly at analysis-runner's own `/metrics`, and Prometheus's scrape target showed healthy — but PromQL queries against `securerollout_check_results_total` returned empty. Root cause: analysis-runner ran 2 replicas behind a Service; Prometheus scraped the Service DNS name, so each scrape hit a random pod with its own independent, unsynchronized in-memory counter — data was silently split and incoherent across two never-summed series.
 
 Confirmed by direct elimination: scaled to 1 replica, data appeared immediately and correctly.
 
-**Real fix (not yet implemented)**: Prometheus should use Kubernetes service discovery to scrape each pod individually, aggregating correctly in PromQL via `sum()` — not rely on a Service to average out counter data, which it structurally cannot do.
+## Session 13 (continued) — Prometheus scraping and persistence fixed
 
+### Fixed: per-pod scraping via Kubernetes service discovery
+Replaced the static Service-DNS scrape target with `kubernetes_sd_configs` (role: pod), relabeled to filter only pods carrying `prometheus.io/scrape: "true"` annotations, rewriting the scrape address to each pod's own IP + declared port. Added Prometheus its own least-privilege RBAC (ServiceAccount + Role, get/list/watch on pods/endpoints/services only, namespace-scoped) to support discovery.
+
+Added the required annotations (`prometheus.io/scrape`, `prometheus.io/port`, `prometheus.io/path`) to analysis-runner's pod template.
+
+**Verified via `/api/v1/targets`**: two distinct, healthy targets for analysis-runner's two replica pods, each scraped by its own real pod IP (not the Service). 8 other cluster pods (target-app, Grafana, Prometheus itself, mock-check) correctly discovered but dropped — not annotated, so not scraped, confirming the opt-in filter works as intended, not scraping everything indiscriminately.
+
+**Verified data correctness**: `sum(securerollout_check_results_total) by (tool, status)` now returns real, coherent aggregated totals across both replicas — the root cause from earlier (each pod's independent counter never being combined) is genuinely resolved. Scaled analysis-runner back to 2 replicas (from the earlier 1-replica stopgap).
+
+### Fixed: Prometheus persistence
+Added a PersistentVolumeClaim (2Gi, RWO) and mounted it at Prometheus's `--storage.tsdb.path`. Confirmed `Bound` status. Data now survives pod restarts — previously wiped to zero on every restart, a real limitation found and fixed within this same session.
+
+### Both fixes verified together
+Triggered a real canary check post-fix; confirmed correct aggregated pass/fail counts by tool appeared in Prometheus within the expected scrape interval, matching analysis-runner's own `/metrics` output exactly.
 **Current state**: analysis-runner running at 1 replica as a stopgap — trades away redundancy for correct metrics, a known and deliberate simplification for this demo cluster, documented rather than silently accepted.
 
 ### Known limitation: Prometheus has no persistent storage
