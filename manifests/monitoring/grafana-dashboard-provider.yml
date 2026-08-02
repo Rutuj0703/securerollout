@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-provider
+  namespace: demo
+data:
+  provider.yml: |
+    apiVersion: 1
+    providers:
+      - name: securerollout
+        folder: SecureRollout
+        type: file
+        options:
+          path: /var/lib/grafana/dashboards

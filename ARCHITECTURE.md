@@ -279,6 +279,25 @@ Attempted to catch analysis-runner mid-check while deleting its Role, to observe
 
 Three genuine, real findings from one session of deliberate failure-testing — this is exactly the value chaos testing is supposed to provide.
 
+## Session 13 — Grafana dashboard: built, and a real Prometheus scrape bug found
+
+### Built
+- Instrumented analysis-runner with Prometheus metrics: `securerollout_check_results_total` (counter, labeled by tool/status), `securerollout_check_duration_seconds` (histogram), `/metrics` endpoint via promhttp.Handler()
+- Minimal hand-rolled Prometheus (not full kube-prometheus-stack, to keep footprint down and understand every piece) scraping analysis-runner + Argo Rollouts' built-in metrics (`rollout_info`, `rollout_info_replicas_*`, `analysis_run_info` — free, no code required)
+- Grafana, both data source and dashboard fully provisioned via ConfigMap (GitOps-consistent, no manual UI setup) — panels: rollout phase, replica counts, security check results by tool, check duration p50/p95, AnalysisRun history table, all-time totals
+
+### Real bug found: Prometheus scraping a load-balanced Service, not individual pods
+Metrics existed correctly at analysis-runner's own `/metrics`, and Prometheus's scrape target showed healthy — but PromQL queries against `securerollout_check_results_total` returned empty. Root cause: analysis-runner ran 2 replicas behind a Service; Prometheus scraped the Service DNS name, so each scrape hit a random pod with its own independent, unsynchronized in-memory counter — data was silently split and incoherent across two never-summed series.
+
+Confirmed by direct elimination: scaled to 1 replica, data appeared immediately and correctly.
+
+**Real fix (not yet implemented)**: Prometheus should use Kubernetes service discovery to scrape each pod individually, aggregating correctly in PromQL via `sum()` — not rely on a Service to average out counter data, which it structurally cannot do.
+
+**Current state**: analysis-runner running at 1 replica as a stopgap — trades away redundancy for correct metrics, a known and deliberate simplification for this demo cluster, documented rather than silently accepted.
+
+### Known limitation: Prometheus has no persistent storage
+Confirmed during this session — a Prometheus pod restart (root cause not fully diagnosed, likely correlates with cluster resource pressure seen elsewhere) wiped all previously-scraped data back to zero, since no PersistentVolume is configured. Fine for demonstrating the mechanism works; not suitable as genuine historical/audit data without adding a PVC.
+
 **Not yet fixed** — documented as a known next step: add a freshness-timestamp check on the PolicyReport (`creationTimestamp`/last-updated field) against a max-staleness threshold, failing closed if exceeded.
 
 Restored Kyverno controllers to 1 replica each after the test; confirmed `kyverno get pods -n kyverno` shows all 4 back to `1/1 Running`.
@@ -307,4 +326,4 @@ to re trigger build:
 echo "# trigger" >> services/target-app/README.md
 git add services/target-app/README.md
 git commit -m "Trigger target-app CD pipeline"
-git push
+git push`

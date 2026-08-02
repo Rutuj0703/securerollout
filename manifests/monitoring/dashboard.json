@@ -1,0 +1,72 @@
+{
+  "title": "SecureRollout — Canary & Security Gate",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Rollout phase",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 0 },
+      "targets": [
+        { "expr": "rollout_info{namespace=\"demo\", name=\"target-app\"}", "legendFormat": "{{phase}}","instant":true, "refId": "A" }
+      ],
+      "options":{
+      	"textMode": "name",
+	"reduceOptions": {"values": false, "calcs": ["lastNotNull"]}
+      }
+    },
+    {
+      "id": 2,
+      "title": "Replicas: available vs desired",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 0 },
+      "targets": [
+        { "expr": "rollout_info_replicas_available{namespace=\"demo\", name=\"target-app\"}", "legendFormat": "available", "refId": "A" },
+        { "expr": "rollout_info_replicas_desired{namespace=\"demo\", name=\"target-app\"}", "legendFormat": "desired", "refId": "B" },
+        { "expr": "rollout_info_replicas_updated{namespace=\"demo\", name=\"target-app\"}", "legendFormat": "updated (canary)", "refId": "C" }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Security check results by tool (rate, 5m)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "expr": "sum by (tool, status) (rate(securerollout_check_results_total[5m]))", "legendFormat": "{{tool}} - {{status}}", "refId": "A" }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } } } }
+    },
+    {
+      "id": 4,
+      "title": "Check duration (p50 / p95)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.50, sum(rate(securerollout_check_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p50", "refId": "A" },
+        { "expr": "histogram_quantile(0.95, sum(rate(securerollout_check_duration_seconds_bucket[5m])) by (le))", "legendFormat": "p95", "refId": "B" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "id": 5,
+      "title": "AnalysisRun outcomes (recent)",
+      "type": "table",
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "analysis_run_info{namespace=\"demo\"}", "instant": true, "format": "table", "refId": "A" }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Total security check results (all time)",
+      "type": "stat",
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        { "expr": "sum by (tool, status) (securerollout_check_results_total)", "legendFormat": "{{tool}} - {{status}}", "refId": "A" }
+      ]
+    }
+  ]
+}
