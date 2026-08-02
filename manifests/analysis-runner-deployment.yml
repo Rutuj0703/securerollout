@@ -12,6 +12,10 @@ spec:
     metadata:
       labels:
         app: analysis-runner
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+        prometheus.io/path: "/metrics"
     spec:
       serviceAccountName: analysis-runner-sa
       containers:

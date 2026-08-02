@@ -35,7 +35,7 @@
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
       "targets": [
-        { "expr": "sum by (tool, status) (rate(securerollout_check_results_total[5m]))", "legendFormat": "{{tool}} - {{status}}", "refId": "A" }
+        { "expr": "sum by (tool, status) (securerollout_check_results_total)", "legendFormat": "{{tool}} - {{status}}", "refId": "A" }
       ],
       "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "stacking": { "mode": "normal" } } } }
     },
