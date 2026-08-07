@@ -325,6 +325,22 @@ Confirmed during this session — a Prometheus pod restart (root cause not fully
 
 Restored Kyverno controllers to 1 replica each after the test; confirmed `kyverno get pods -n kyverno` shows all 4 back to `1/1 Running`.
 
+## Session 15 — Cluster recreate (disk reclaimed), and a real ArgoCD self-management bug found and fixed
+
+### Cluster recreate
+Disk pressure (repeatedly hitting 98-100% throughout the project) finally traced to its true root cause: `/var/lib/docker/volumes` alone was consuming 55GB — Kind's 3 simulated nodes, each maintaining its own full containerd runtime, image cache, and (for the control-plane) etcd data, accumulated across months of `kind load docker-image` calls with no automatic garbage collection short of a node restart. `kind delete cluster` + recreate was the only real fix (volumes can't be selectively cleaned while nodes are live) — reclaimed the full 55GB, disk usage dropped from 98% to 55%.
+
+Redeployed cleanly: Argo Rollouts, Kyverno, ArgoCD reinstalled from their standard install manifests; `demo` namespace recreated; local Docker images reloaded via `kind load docker-image`. Once the ArgoCD `Application` was reapplied, it automatically restored the entire `manifests/` directory (RBAC, ConfigMap, Deployment/Service, AnalysisTemplate, Rollout) in one shot — the real, tangible payoff of the GitOps investment: a fresh cluster came back to a fully working state from a single `kubectl apply`, not a manual re-run of every file.
+
+### Real bug found: ArgoCD Application managing itself
+`syncPolicy: automated` had been set locally and applied via `kubectl apply` in an earlier session, but never committed/pushed to GitHub. Because `manifests/argocd-application.yml` lives inside the very `manifests/` path the Application itself watches and syncs, ArgoCD kept silently reverting the local edit back to the last **committed** (still-manual) version on every reconcile — a genuine, structural "self-referential GitOps" pitfall, distinct from every other config-drift bug found this project (which were typos/missing fields, not a location/architecture issue). Confirmed via `git diff origin/main` showing the automated-sync change had never actually been pushed.
+
+**Fix**: committed and pushed the real change, then ran one final manual sync (required since the live policy was still Manual — a chicken-and-egg step, since Automated can't self-apply the commit that turns it on). From that point forward, `selfHeal` is enforced with no further manual syncs needed.
+
+**Verified selfHeal works for real this time**: manually patched `analysis-runner`'s replica count to 5 via `kubectl patch` (simulating manual drift) — ArgoCD reverted it back to Git's value (2) within 4 seconds, entirely automatically.
+
+Good interview note: *"I found a real self-referential bug in my GitOps setup — my ArgoCD Application definition lived inside the same path it manages, so a local-only, uncommitted change to enable automated sync kept getting silently overwritten by the Application syncing itself back to the last committed version. It's a subtle failure mode specific to GitOps architectures, not a typo — the fix was recognizing that a resource watching a path shouldn't itself live inside that path without understanding the sync implications."*
+
 ### Remaining chaos scenarios not yet tested
 - Kyverno background controller unreachable (scale to 0)
 - analysis-runner Service deleted (vs. pods) — DNS-resolution-specific failure path
