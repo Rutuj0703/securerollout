@@ -11,6 +11,7 @@ spec:
     path: manifests
     directory:
       recurse: true
+      exclude: "monitoring/dashboard.json"
   destination:
     server: https://kubernetes.default.svc
     namespace: demo
