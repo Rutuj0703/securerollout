@@ -355,6 +355,16 @@ Attempted fix (`directory.exclude: "monitoring/dashboard.json"`, committed + pus
 
 Three-layer real bug: a structural GitOps pitfall (app managing its own definition) + an operational gotcha (recursive scan = parse everything) + their interaction producing a genuine chicken-and-egg deadlock, resolved by knowingly stepping outside the declarative system (direct kubectl patch) to unblock it. Strong, honest debugging narrative — each layer diagnosed with direct evidence, not guessed.`
 
+## Session 15 (final) — Full post-recreate verification, confirmed working end to end
+
+Verified the complete loop after disaster recovery: cluster → platform components → GitOps-restored application + monitoring stack → real canary triggered → real Trivy/Kyverno/cosign checks → real metrics scraped → Grafana dashboard showing real, current data (security check pass/fail by tool: cosign/kyverno/trivy all "pass" this run, AnalysisRun history, replica counts). 
+
+This run's canary actually succeeded and promoted (unlike most earlier tests, which deliberately triggered failures) — first time seeing the full "happy path" reflected in the dashboard, not just failure scenarios.
+
+Minor cosmetic note: Rollout phase Stat panel shows multiple phase labels (Completed/Paused/Progressing) when a rollout transitions through several phases within the queried time window — same underlying multi-series-over-time behavior noted earlier in the project, not a new bug, not worth further tuning.
+
+**System is confirmed genuinely reproducible from Git + Docker images alone** — the
+
 ### Remaining chaos scenarios not yet tested
 - Kyverno background controller unreachable (scale to 0)
 - analysis-runner Service deleted (vs. pods) — DNS-resolution-specific failure path
