@@ -341,6 +341,20 @@ Redeployed cleanly: Argo Rollouts, Kyverno, ArgoCD reinstalled from their standa
 
 Good interview note: *"I found a real self-referential bug in my GitOps setup — my ArgoCD Application definition lived inside the same path it manages, so a local-only, uncommitted change to enable automated sync kept getting silently overwritten by the Application syncing itself back to the last committed version. It's a subtle failure mode specific to GitOps architectures, not a typo — the fix was recognizing that a resource watching a path shouldn't itself live inside that path without understanding the sync implications."*
 
+## Session 15 (continued) — ArgoCD self-management deadlock, resolved
+
+Post-recreate, discovered `manifests/monitoring/` (Prometheus, Grafana) wasn't restored at all — root cause: ArgoCD's directory source doesn't scan subfolders by default. Added `directory.recurse: true`.
+
+This immediately broke the entire Application (`ComparisonError`, every resource showing as missing in `argocd app diff`) — root cause, found via `status.conditions`: recursive scanning parses every file under `manifests/` as a K8s manifest, and `manifests/monitoring/dashboard.json` (raw Grafana JSON, not a K8s object) failed parsing and took down the whole source, not just itself.
+
+Attempted fix (`directory.exclude: "monitoring/dashboard.json"`, committed + pushed) hit the same self-management issue from earlier in this session: since the source was already broken, ArgoCD couldn't sync at all — including the commit meant to fix it. Genuine deadlock.
+
+**Resolved via direct `kubectl patch application ... --type merge`**, injecting the `exclude` field into the live object, bypassing the broken Git-sync path just long enough to unblock reconciliation. Immediately cleared the ComparisonError; full monitoring stack (Prometheus + Grafana + supporting RBAC/ConfigMaps/PVC) synced successfully in one pass afterward.
+
+**Verified**: both `prometheus` and `grafana` pods `Running`, PVC `Bound`, all resources `Synced` in ArgoCD.
+
+Three-layer real bug: a structural GitOps pitfall (app managing its own definition) + an operational gotcha (recursive scan = parse everything) + their interaction producing a genuine chicken-and-egg deadlock, resolved by knowingly stepping outside the declarative system (direct kubectl patch) to unblock it. Strong, honest debugging narrative — each layer diagnosed with direct evidence, not guessed.`
+
 ### Remaining chaos scenarios not yet tested
 - Kyverno background controller unreachable (scale to 0)
 - analysis-runner Service deleted (vs. pods) — DNS-resolution-specific failure path
