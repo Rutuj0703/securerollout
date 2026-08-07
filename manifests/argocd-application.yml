@@ -9,6 +9,8 @@ spec:
     repoURL: https://github.com/Rutuj0703/securerollout.git
     targetRevision: main
     path: manifests
+    directory:
+      recurse: true
   destination:
     server: https://kubernetes.default.svc
     namespace: demo
